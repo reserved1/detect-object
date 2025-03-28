@@ -54,7 +54,11 @@ extension CameraViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
         let request = VNCoreMLRequest(model: model) { (request, error) in
             
             guard let results = request.results as? [VNClassificationObservation] else { return }
-            
+            /*
+             Aqui em baixo devia ser possivel capturar os 'confidences' pra poder comparar
+             busquei no VNClassificationObservation e existe na herança dele o confidence mas n consigo
+             utilizá-lo
+            */
             if let firstResult = results.first, results.confidence! > 0.3 {
                 DispatchQueue.main.async {
                     self.viewModel.detectedObject = firstResult.identifier
