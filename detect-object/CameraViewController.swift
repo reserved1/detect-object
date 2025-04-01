@@ -1,85 +1,122 @@
+import UIKit
 import SwiftUI
 import AVFoundation
 import Vision
 
-class CameraViewController: UIViewController {
-    var captureSession: AVCaptureSession!
-    var previewLayer: AVCaptureVideoPreviewLayer!
-    var viewModel: CameraViewModel
+
+class CameraViewController: UIViewController, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private var permissionGranted = false // Flag for permission
+    private let captureSession = AVCaptureSession()
+    private let sessionQueue = DispatchQueue(label: "sessionQueue")
+    private var previewLayer = AVCaptureVideoPreviewLayer()
+    var screenRect: CGRect! = nil // For view dimensions
     
-    init(viewModel: CameraViewModel) {
-        self.viewModel = viewModel
-        super.init(nibName: nil, bundle: nil)
-    }
+    // Detector
+    private var videoOutput = AVCaptureVideoDataOutput()
+    var requests = [VNRequest]()
+    var detectionLayer: CALayer! = nil
     
-    required init?(coder: NSCoder) {
-        fatalError("Coder not implemented")
-    }
-    
+      
     override func viewDidLoad() {
-        super.viewDidLoad()
+        checkPermission()
         
-        captureSession = AVCaptureSession()
-        captureSession.beginConfiguration()
-        
-        guard let videoDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-        let videoInput = try? AVCaptureDeviceInput(device: videoDevice) else {
-            return
+        sessionQueue.async { [unowned self] in
+            guard permissionGranted else { return }
+            self.setupCaptureSession()
+            
+            self.setupLayers()
+            self.setupDetector()
+            
+            self.captureSession.startRunning()
         }
+    }
+    
+    override func willTransition(to newCollection: UITraitCollection, with coordinator: UIViewControllerTransitionCoordinator) {
+        screenRect = UIScreen.main.bounds
+        self.previewLayer.frame = CGRect(x: 0, y: 0, width: screenRect.size.width, height: screenRect.size.height)
+
+        switch UIDevice.current.orientation {
+            // Home button on top
+            case UIDeviceOrientation.portraitUpsideDown:
+            self.previewLayer.connection?.videoRotationAngle = 90
+             
+            // Home button on right
+            case UIDeviceOrientation.landscapeLeft:
+                self.previewLayer.connection?.videoRotationAngle = 180
+            
+            // Home button on left
+            case UIDeviceOrientation.landscapeRight:
+            self.previewLayer.connection?.videoRotationAngle = 0
+             
+            // Home button at bottom
+            case UIDeviceOrientation.portrait:
+                self.previewLayer.connection?.videoRotationAngle = 90
+                
+            default:
+                break
+            }
         
-        captureSession.addInput(videoInput)
-        
-        let videoOutput = AVCaptureVideoDataOutput()
-        
-        videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "cameraQueue"))
-        captureSession.addOutput(videoOutput)
+        // Detector
+        updateLayers()
+    }
+    
+    func checkPermission() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+            // Permission has been granted before
+            case .authorized:
+                permissionGranted = true
+                
+            // Permission has not been requested yet
+            case .notDetermined:
+                requestPermission()
+                    
+            default:
+                permissionGranted = false
+            }
+    }
+    
+    func requestPermission() {
+        sessionQueue.suspend()
+        AVCaptureDevice.requestAccess(for: .video) { [unowned self] granted in
+            self.permissionGranted = granted
+            self.sessionQueue.resume()
+        }
+    }
+    
+    func setupCaptureSession() {
+        // Camera input
+        guard let videoDevice = AVCaptureDevice.default(.builtInDualWideCamera,for: .video, position: .back) else { return }
+        guard let videoDeviceInput = try? AVCaptureDeviceInput(device: videoDevice) else { return }
+           
+        guard captureSession.canAddInput(videoDeviceInput) else { return }
+        captureSession.addInput(videoDeviceInput)
+                         
+        // Preview layer
+        screenRect = UIScreen.main.bounds
         
         previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
-        previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = view.layer.bounds
+        previewLayer.frame = CGRect(x: 0, y: 0, width: screenRect.size.width, height: screenRect.size.height)
+        previewLayer.videoGravity = AVLayerVideoGravity.resizeAspectFill // Fill screen
+        previewLayer.connection?.videoRotationAngle = 90
         
-        view.layer.addSublayer(previewLayer)
+        // Detector
+        videoOutput.setSampleBufferDelegate(self, queue: DispatchQueue(label: "sampleBufferQueue"))
+        captureSession.addOutput(videoOutput)
         
-        captureSession.commitConfiguration()
-        captureSession.startRunning()
+        videoOutput.connection(with: .video)?.videoRotationAngle = 90
+        
+        // Updates to UI must be on main queue
+        DispatchQueue.main.async { [weak self] in
+            self!.view.layer.addSublayer(self!.previewLayer)
+        }
     }
 }
 
-extension CameraViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
-    func detectObject(sample: CMSampleBuffer) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
-        
-        guard let model = try? VNCoreMLModel(for: MobileNetV2().model) else { return }
-        
-        let request = VNCoreMLRequest(model: model) { (request, error) in
-            
-            guard let results = request.results as? [VNClassificationObservation] else { return }
-            /*
-             Aqui em baixo devia ser possivel capturar os 'confidences' pra poder comparar
-             busquei no VNClassificationObservation e existe na herança dele o confidence mas n consigo
-             utilizá-lo
-            */
-            if let firstResult = results.first, results.confidence! > 0.3 {
-                DispatchQueue.main.async {
-                    self.viewModel.detectedObject = firstResult.identifier
-                    self.viewModel.confidence = firstResult.confidence
-                    print("Detected Object: \(firstResult.identifier), with confidence \(firstResult.confidence)")
-                    self.viewModel.boundingBox = CGRect(x: 120, y: 100, width: 200, height: 200)
-                }
-            } else {
-                DispatchQueue.main.async {
-                    self.viewModel.detectedObject = "No object detected with sufficient confidence"
-                    self.viewModel.confidence = 0.0
-                    self.viewModel.boundingBox = .zero
-                }
-            }
+struct HostedViewController: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> UIViewController {
+        return CameraViewController()
         }
-        
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
-        try? handler.perform([request])
-    }
-    
-    func captureOutput(_ output: AVCaptureOutput, didDrop sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        detectObject(sample: sampleBuffer)
-    }
+
+        func updateUIViewController(_ uiViewController: UIViewController, context: Context) {
+        }
 }
